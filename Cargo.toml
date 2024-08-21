@@ -1,11 +1,13 @@
 [package]
-name = "funnibitmapper"
+name = "osu-util"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0.86"
+clap = { version = "4.5.13", features = ["derive"] }
 md5 = "0.7.0"
 osu-db = "0.3.0"
 osu-file-parser = "1.1.0"
@@ -16,7 +18,7 @@ debug-assertions = false
 overflow-checks = false
 incremental = false
 strip = "symbols"
-# panic = 'abort'
+#panic = "abort"
 opt-level = 3
 debug = false
 lto = true
