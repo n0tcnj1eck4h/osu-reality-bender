@@ -4,7 +4,7 @@ use osu_db::collection::Collection;
 use osu_db::listing::{Beatmap, Listing};
 use osu_db::replay::Replay;
 use osu_db::score::{BeatmapScores, ScoreList};
-use osu_db::CollectionList;
+use osu_db::{CollectionList, Mod, ModSet};
 use osu_file_parser::OsuFile;
 use replay_to_beatmap::convert_replay_to_beatmap;
 use std::error::Error;
@@ -28,6 +28,7 @@ enum SubCommand {
     ImportReplaysWIP,
     ImportDatabaseWIP { other_osu_db: PathBuf },
     AddAllMapsToCollection { collection_name: Option<String> },
+    DiffCalc { mods: Option<String> },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -239,6 +240,79 @@ fn main() -> anyhow::Result<()> {
             );
             collection.collections.push(all_maps_collection);
             collection.to_file(collection_path)?;
+        }
+        SubCommand::DiffCalc { .. } => {
+            let osu_db_path = osu_path.join("osu!.db");
+
+            println!("Reading osu!.db...");
+            let mut listing = Listing::from_file(&osu_db_path)?;
+
+            let mut calculated_maps = 0;
+            let mut skipped_maps = 0;
+            let mut print_thing = 0;
+            let map_count = listing.beatmaps.len();
+
+            let nomod = ModSet(0);
+            let hr = ModSet(1 << Mod::HardRock.raw() as u32);
+            let dt = ModSet(1 << Mod::DoubleTime.raw() as u32);
+            let dthr = dt.with(Mod::HardRock);
+            let wanted_modsets = &[nomod, hr, dt, dthr];
+
+            for beatmap in &mut listing.beatmaps {
+                let filtered_modsets: Vec<_> = wanted_modsets
+                    .iter()
+                    .filter(|modset| {
+                        beatmap
+                            .std_ratings
+                            .iter()
+                            .find(|e| e.0 == **modset)
+                            .is_none()
+                    })
+                    .collect();
+
+                if filtered_modsets.is_empty() {
+                    skipped_maps += 1;
+                    continue;
+                }
+
+                let mut map_path = osu_path.join("Songs");
+                map_path.push(beatmap.folder_name.as_ref().unwrap());
+                map_path.push(beatmap.file_name.as_ref().unwrap());
+
+                if let Ok(map) = rosu_pp::Beatmap::from_path(map_path) {
+                    for modset in filtered_modsets {
+                        let diff_attrs = rosu_pp::Difficulty::new().mods(modset.0).calculate(&map);
+                        let stars = diff_attrs.stars();
+                        beatmap.std_ratings.push((*modset, stars));
+                    }
+
+                    calculated_maps += 1;
+                    print_thing += 1;
+
+                    if print_thing == 128 {
+                        print!(
+                            "\rCalculated {}/{} maps. {} skipped.",
+                            calculated_maps, map_count, skipped_maps
+                        );
+                        std::io::stdout()
+                            .flush()
+                            .ok()
+                            .expect("Could not flush stdout");
+                        print_thing = 0;
+                    }
+                }
+            }
+
+            println!(
+                "\rCalcualted {} maps. Skipped {}. {} maps were already calculated.",
+                calculated_maps,
+                skipped_maps,
+                map_count - calculated_maps,
+            );
+
+            println!("Saving database...");
+            listing.save(osu_db_path)?;
+            println!("Done.");
         }
     }
 
