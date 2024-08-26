@@ -247,6 +247,23 @@ fn main() -> anyhow::Result<()> {
             println!("Reading osu!.db...");
             let mut listing = Listing::from_file(&osu_db_path)?;
 
+            let osu_cfg_filename = format!("osu!.{}.cfg", whoami::username());
+            let cfg_path = osu_path.join(osu_cfg_filename);
+
+            let mut songs_path = "Songs".to_string();
+
+            for line in fs::read_to_string(cfg_path)?.lines() {
+                if line.starts_with("BeatmapDirectory") {
+                    if let Some(val) = line.split("=").nth(1) {
+                        songs_path = val.trim().to_string();
+                        break;
+                    }
+                }
+            }
+
+            let songs_path = osu_path.join(&songs_path);
+            println!("Songs path is {}", songs_path.display());
+
             let mut calculated_maps = 0;
             let mut skipped_maps = 0;
             let mut print_thing = 0;
@@ -275,8 +292,7 @@ fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                let mut map_path = osu_path.join("Songs");
-                map_path.push(beatmap.folder_name.as_ref().unwrap());
+                let mut map_path = songs_path.join(beatmap.folder_name.as_ref().unwrap());
                 map_path.push(beatmap.file_name.as_ref().unwrap());
 
                 if let Ok(map) = rosu_pp::Beatmap::from_path(map_path) {
