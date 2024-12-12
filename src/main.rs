@@ -6,11 +6,12 @@ use osu_db::replay::Replay;
 use osu_db::score::{BeatmapScores, ScoreList};
 use osu_db::{CollectionList, Mod, ModSet};
 use osu_file_parser::OsuFile;
+use rayon::prelude::*;
 use replay_to_beatmap::convert_replay_to_beatmap;
-use std::error::Error;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use clap::{Parser, Subcommand};
 
@@ -197,7 +198,7 @@ fn main() -> anyhow::Result<()> {
                     .binary_search_by(|probe| probe.hash.cmp(&new_map.hash));
 
                 match index {
-                    Ok(existing_map_index) => {
+                    Ok(_existing_map_index) => {
                         println!(
                             "Merging difficulty ratings for beatmap {}",
                             new_map.beatmap_id
@@ -264,9 +265,9 @@ fn main() -> anyhow::Result<()> {
             let songs_path = osu_path.join(&songs_path);
             println!("Songs path is {}", songs_path.display());
 
-            let mut calculated_maps = 0;
-            let mut skipped_maps = 0;
-            let mut print_thing = 0;
+            let calculated_maps = AtomicUsize::new(0);
+            let skipped_maps = AtomicU32::new(0);
+            let print_thing = AtomicU32::new(0);
             let map_count = listing.beatmaps.len();
 
             let nomod = ModSet(0);
@@ -275,54 +276,66 @@ fn main() -> anyhow::Result<()> {
             let dthr = dt.with(Mod::HardRock);
             let wanted_modsets = &[nomod, hr, dt, dthr];
 
-            for beatmap in &mut listing.beatmaps {
-                let filtered_modsets: Vec<_> = wanted_modsets
-                    .iter()
-                    .filter(|modset| {
-                        beatmap
-                            .std_ratings
-                            .iter()
-                            .find(|e| e.0 == **modset)
-                            .is_none()
-                    })
-                    .collect();
+            let beatmaps: Vec<Beatmap> = listing
+                .beatmaps
+                .into_par_iter()
+                .map(|mut beatmap| {
+                    let missing_map_modset_calcs: Vec<_> = wanted_modsets
+                        .iter()
+                        .filter(|modset| {
+                            beatmap
+                                .std_ratings
+                                .iter()
+                                .find(|e| e.0 == **modset)
+                                .is_none()
+                        })
+                        .collect();
 
-                if filtered_modsets.is_empty() {
-                    skipped_maps += 1;
-                    continue;
-                }
-
-                let mut map_path = songs_path.join(beatmap.folder_name.as_ref().unwrap());
-                map_path.push(beatmap.file_name.as_ref().unwrap());
-
-                if let Ok(map) = rosu_pp::Beatmap::from_path(map_path) {
-                    for modset in filtered_modsets {
-                        let diff_attrs = rosu_pp::Difficulty::new().mods(modset.0).calculate(&map);
-                        let stars = diff_attrs.stars();
-                        beatmap.std_ratings.push((*modset, stars));
+                    if missing_map_modset_calcs.is_empty() {
+                        skipped_maps.fetch_add(1, Ordering::Relaxed);
+                        return beatmap;
                     }
 
-                    calculated_maps += 1;
-                    print_thing += 1;
+                    let mut map_path = songs_path.join(beatmap.folder_name.as_ref().unwrap());
+                    map_path.push(beatmap.file_name.as_ref().unwrap());
 
-                    if print_thing == 128 {
-                        print!(
-                            "\rCalculated {}/{} maps. {} skipped.",
-                            calculated_maps, map_count, skipped_maps
-                        );
-                        std::io::stdout()
-                            .flush()
-                            .ok()
-                            .expect("Could not flush stdout");
-                        print_thing = 0;
+                    if let Ok(map) = rosu_pp::Beatmap::from_path(map_path) {
+                        for modset in missing_map_modset_calcs {
+                            let diff_attrs =
+                                rosu_pp::Difficulty::new().mods(modset.0).calculate(&map);
+                            let stars = diff_attrs.stars();
+                            beatmap.std_ratings.push((*modset, stars));
+                        }
+
+                        calculated_maps.fetch_add(1, Ordering::Relaxed);
+                        print_thing.fetch_add(1, Ordering::Relaxed);
+
+                        if print_thing.load(Ordering::Relaxed) == 128 {
+                            let calculated_maps = calculated_maps.load(Ordering::Relaxed);
+                            let skipped_maps = skipped_maps.load(Ordering::Relaxed);
+                            print!(
+                                "\rCalculated {}/{} maps. {} skipped.",
+                                calculated_maps, map_count, skipped_maps
+                            );
+                            std::io::stdout()
+                                .flush()
+                                .ok()
+                                .expect("Could not flush stdout");
+                            print_thing.store(0, Ordering::Relaxed);
+                        }
                     }
-                }
-            }
 
+                    beatmap
+                })
+                .collect();
+
+            listing.beatmaps = beatmaps;
+
+            let calculated_maps = calculated_maps.load(Ordering::Relaxed);
             println!(
                 "\rCalcualted {} maps. Skipped {}. {} maps were already calculated.",
                 calculated_maps,
-                skipped_maps,
+                skipped_maps.load(Ordering::Relaxed),
                 map_count - calculated_maps,
             );
 
